@@ -1,0 +1,30 @@
+name: Cleanup v1 import scaffolding
+
+on:
+  push:
+    branches:
+      - import-v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Remove temporary import workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/restore-v1-correction.yml
+          rm -f .github/workflows/cleanup-v1-import.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'chore: remove v1 import scaffolding'
+          git push origin HEAD:import-v1.0.0
