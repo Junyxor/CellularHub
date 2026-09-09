@@ -69,12 +69,15 @@ mod imp {
     };
 
     pub fn discover() -> Vec<DeviceInfo> {
+        // COM interfaces are apartment-bound. Enumerate on a dedicated MTA and
+        // return only plain Rust data to the Tauri/UI thread.
         thread::spawn(discover_worker).join().unwrap_or_default()
     }
 
     fn discover_worker() -> Vec<DeviceInfo> {
         let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().is_ok();
         if !initialized { return Vec::new(); }
+
         let result = unsafe { enumerate_interfaces() }.unwrap_or_default();
         unsafe { CoUninitialize(); }
         result
@@ -94,7 +97,9 @@ mod imp {
                 .unwrap_or_else(|_| "unknown".into());
 
             let mut caps = MBN_INTERFACE_CAPS::default();
-            if unsafe { interface.GetInterfaceCapability(&mut caps) }.is_err() { continue; }
+            if unsafe { interface.GetInterfaceCapability(&mut caps) }.is_err() {
+                continue;
+            }
 
             let sms_caps = caps.smsCaps;
             let manufacturer = bstr_field(&caps.manufacturer);
@@ -119,7 +124,11 @@ mod imp {
                 capabilities: CapabilitySet {
                     data: true,
                     sms_receive: sms_caps & receive_mask != 0,
+                    // Sending is intentionally not exposed in v0.3. Receiving is
+                    // the compatibility requirement and is much easier to validate.
                     sms_send: false,
+                    // An MBN interface does not by itself prove that an eUICC is
+                    // present. Native eSIM is handled through Windows LPA separately.
                     esim: false,
                     signal: true,
                     operator: true,
@@ -129,9 +138,13 @@ mod imp {
         Ok(devices)
     }
 
-    fn bstr_field(value: &ManuallyDrop<windows::core::BSTR>) -> String { value.to_string() }
+    fn bstr_field(value: &ManuallyDrop<windows::core::BSTR>) -> String {
+        value.to_string()
+    }
 
     unsafe fn drop_caps_strings(caps: &mut MBN_INTERFACE_CAPS) {
+        // GetInterfaceCapability returns ownership of these BSTR fields, while
+        // windows-rs uses ManuallyDrop in this ABI struct.
         unsafe {
             ManuallyDrop::drop(&mut caps.customDataClass);
             ManuallyDrop::drop(&mut caps.customBandClass);
@@ -165,7 +178,9 @@ mod imp {
         });
 
         thread::spawn(move || {
-            if let Err(error) = run_worker(app, manager.clone(), id, stop) { manager.set_error(error); }
+            if let Err(error) = run_worker(app, manager.clone(), id, stop) {
+                manager.set_error(error);
+            }
         });
         Ok(())
     }
@@ -179,6 +194,7 @@ mod imp {
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
             .map_err(|error| format!("无法初始化 Windows COM: {error}"))?;
+
         let result = unsafe { run_worker_inner(&app, &manager, &interface_id, &stop) };
         unsafe { CoUninitialize(); }
         result
@@ -218,6 +234,7 @@ mod imp {
             ticks = ticks.wrapping_add(1);
             if ticks % 60 == 0 { update_snapshot(manager, &interface, true); }
         }
+
         let _ = unsafe { point.Unadvise(cookie) };
         Ok(())
     }
@@ -264,8 +281,20 @@ mod imp {
 
     impl IMbnSmsEvents_Impl for SmsEvents_Impl {
         fn OnSmsConfigurationChange(&self, _sms: Ref<'_, IMbnSms>) -> WinResult<()> { Ok(()) }
-        fn OnSetSmsConfigurationComplete(&self, _sms: Ref<'_, IMbnSms>, _requestid: u32, _status: HRESULT) -> WinResult<()> { Ok(()) }
-        fn OnSmsSendComplete(&self, _sms: Ref<'_, IMbnSms>, _requestid: u32, _status: HRESULT) -> WinResult<()> { Ok(()) }
+
+        fn OnSetSmsConfigurationComplete(
+            &self,
+            _sms: Ref<'_, IMbnSms>,
+            _requestid: u32,
+            _status: HRESULT,
+        ) -> WinResult<()> { Ok(()) }
+
+        fn OnSmsSendComplete(
+            &self,
+            _sms: Ref<'_, IMbnSms>,
+            _requestid: u32,
+            _status: HRESULT,
+        ) -> WinResult<()> { Ok(()) }
 
         fn OnSmsReadComplete(
             &self,
@@ -279,16 +308,30 @@ mod imp {
             if status.ok().is_ok() && smsformat == MBN_SMS_FORMAT_PDU {
                 let _ = unsafe { self.consume_pdu_array(readmsgs) };
             }
-            if moremsgs.as_bool() { if let Some(sms) = sms.as_ref() { request_new_messages(sms); } }
+            if moremsgs.as_bool() {
+                if let Some(sms) = sms.as_ref() { request_new_messages(sms); }
+            }
             Ok(())
         }
 
-        fn OnSmsNewClass0Message(&self, _sms: Ref<'_, IMbnSms>, smsformat: MBN_SMS_FORMAT, readmsgs: *const SAFEARRAY) -> WinResult<()> {
-            if smsformat == MBN_SMS_FORMAT_PDU { let _ = unsafe { self.consume_pdu_array(readmsgs) }; }
+        fn OnSmsNewClass0Message(
+            &self,
+            _sms: Ref<'_, IMbnSms>,
+            smsformat: MBN_SMS_FORMAT,
+            readmsgs: *const SAFEARRAY,
+        ) -> WinResult<()> {
+            if smsformat == MBN_SMS_FORMAT_PDU {
+                let _ = unsafe { self.consume_pdu_array(readmsgs) };
+            }
             Ok(())
         }
 
-        fn OnSmsDeleteComplete(&self, _sms: Ref<'_, IMbnSms>, _requestid: u32, _status: HRESULT) -> WinResult<()> { Ok(()) }
+        fn OnSmsDeleteComplete(
+            &self,
+            _sms: Ref<'_, IMbnSms>,
+            _requestid: u32,
+            _status: HRESULT,
+        ) -> WinResult<()> { Ok(()) }
 
         fn OnSmsStatusChange(&self, sms: Ref<'_, IMbnSms>) -> WinResult<()> {
             if let Some(sms) = sms.as_ref() { request_new_messages(sms); }
@@ -306,9 +349,14 @@ mod imp {
                 let Some((sender, body)) = self.multipart.lock().expect("multipart poisoned").push(decoded) else { continue; };
 
                 let sms = SmsMessage {
-                    id: Uuid::new_v4().to_string(), sender, body,
-                    received_at: Utc::now().to_rfc3339(), unread: true, archived: false,
-                    backend: BackendKind::WindowsMbn, slot: index,
+                    id: Uuid::new_v4().to_string(),
+                    sender,
+                    body,
+                    received_at: Utc::now().to_rfc3339(),
+                    unread: true,
+                    archived: false,
+                    backend: BackendKind::WindowsMbn,
+                    slot: index,
                 };
                 if !self.manager.push_message(sms.clone()) { continue; }
                 let _ = self.app.emit("sms-received", sms.clone());
@@ -323,11 +371,14 @@ mod imp {
         let lower = unsafe { SafeArrayGetLBound(array, 1)? };
         let upper = unsafe { SafeArrayGetUBound(array, 1)? };
         if upper < lower { return Ok(Vec::new()); }
+
         let mut result = Vec::with_capacity((upper - lower + 1) as usize);
         for index in lower..=upper {
             let mut raw: *mut c_void = std::ptr::null_mut();
             unsafe { SafeArrayGetElement(array, &index, &mut raw as *mut _ as *mut c_void)?; }
-            if !raw.is_null() { result.push(unsafe { IUnknown::from_raw(raw) }); }
+            if !raw.is_null() {
+                result.push(unsafe { IUnknown::from_raw(raw) });
+            }
         }
         Ok(result)
     }
@@ -338,7 +389,14 @@ pub use imp::{discover, spawn_listener};
 
 #[allow(dead_code)]
 pub fn planned_capabilities() -> CapabilitySet {
-    CapabilitySet { data: true, sms_receive: true, sms_send: false, esim: false, signal: true, operator: true }
+    CapabilitySet {
+        data: true,
+        sms_receive: true,
+        sms_send: false,
+        esim: false,
+        signal: true,
+        operator: true,
+    }
 }
 
 #[allow(dead_code)]

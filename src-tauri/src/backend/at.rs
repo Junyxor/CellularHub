@@ -85,6 +85,9 @@ fn run_worker(app: &AppHandle, manager: &Arc<CellularManager>, port_name: &str, 
         .map_err(|e| format!("AT 后端打开失败: {e}"))?;
 
     let _ = send_command(&mut *port, "ATE0", Duration::from_secs(1));
+
+    // Prefer text mode for broad modem compatibility. If the firmware rejects CMGF=1,
+    // switch to PDU mode and decode TPDU/UDH ourselves.
     let text_mode = send_command(&mut *port, "AT+CMGF=1", Duration::from_secs(2))
         .map(|response| !response.to_ascii_uppercase().contains("ERROR"))
         .unwrap_or(false);
@@ -271,7 +274,9 @@ fn decode_possible_ucs2(input: &str) -> String {
     let clean = input.trim().trim_matches('"');
     if clean.len() >= 4 && clean.len() % 4 == 0 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
         let units: Option<Vec<u16>> = clean.as_bytes().chunks_exact(4).map(|chunk| std::str::from_utf8(chunk).ok().and_then(|hex| u16::from_str_radix(hex, 16).ok())).collect();
-        if let Some(units) = units { if let Ok(decoded) = String::from_utf16(&units) { return decoded; } }
+        if let Some(units) = units {
+            if let Ok(decoded) = String::from_utf16(&units) { return decoded; }
+        }
     }
     clean.to_string()
 }
@@ -295,7 +300,13 @@ fn parse_csq(response: &str) -> Option<(u8, Option<i32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn parses_cmti() { assert_eq!(parse_cmti("+CMTI: \"SM\",12"), Some(12)); }
-    #[test] fn decodes_ucs2() { assert_eq!(decode_possible_ucs2("4F60597D"), "你好"); }
-    #[test] fn parses_csq() { assert_eq!(parse_csq("\r\n+CSQ: 20,99\r\nOK\r\n"), Some((65, Some(-73)))); }
+
+    #[test]
+    fn parses_cmti() { assert_eq!(parse_cmti("+CMTI: \"SM\",12"), Some(12)); }
+
+    #[test]
+    fn decodes_ucs2() { assert_eq!(decode_possible_ucs2("4F60597D"), "你好"); }
+
+    #[test]
+    fn parses_csq() { assert_eq!(parse_csq("\r\n+CSQ: 20,99\r\nOK\r\n"), Some((65, Some(-73)))); }
 }

@@ -76,16 +76,21 @@ pub fn decode_sms_deliver(pdu: &str) -> Result<DecodedSms, String> {
     let sender = decode_address(address_bytes, address_len, toa);
     index = address_end;
 
+    // PID + DCS
     let _pid = *bytes.get(index).ok_or("缺少 PID")?;
     let dcs = *bytes.get(index + 1).ok_or("缺少 DCS")?;
     index += 2;
+
+    // SCTS = 7 octets. We currently use local receive time in the upper layer.
     index = index.checked_add(7).ok_or("SCTS 长度溢出")?;
     if index >= bytes.len() { return Err("缺少用户数据长度".into()); }
     let udl = bytes[index] as usize;
     index += 1;
     let user_data = bytes.get(index..).ok_or("用户数据不完整")?;
 
-    let (header_octets, concat) = if udhi { parse_udh(user_data)? } else { (0, None) };
+    let (header_octets, concat) = if udhi {
+        parse_udh(user_data)?
+    } else { (0, None) };
 
     let alphabet = dcs & 0x0c;
     let body = match alphabet {
@@ -110,8 +115,12 @@ fn parse_udh(user_data: &[u8]) -> Result<(usize, Option<ConcatInfo>), String> {
         cursor += 2;
         if cursor + len > header_octets { break; }
         match (iei, len) {
-            (0x00, 3) => concat = Some(ConcatInfo { reference: user_data[cursor] as u16, total: user_data[cursor + 1], sequence: user_data[cursor + 2] }),
-            (0x08, 4) => concat = Some(ConcatInfo { reference: u16::from_be_bytes([user_data[cursor], user_data[cursor + 1]]), total: user_data[cursor + 2], sequence: user_data[cursor + 3] }),
+            (0x00, 3) => {
+                concat = Some(ConcatInfo { reference: user_data[cursor] as u16, total: user_data[cursor + 1], sequence: user_data[cursor + 2] });
+            }
+            (0x08, 4) => {
+                concat = Some(ConcatInfo { reference: u16::from_be_bytes([user_data[cursor], user_data[cursor + 1]]), total: user_data[cursor + 2], sequence: user_data[cursor + 3] });
+            }
             _ => {}
         }
         cursor += len;
@@ -159,7 +168,9 @@ fn decode_gsm7(data: &[u8], header_octets: usize, udl_septets: usize) -> Result<
         let shift = bit % 8;
         let Some(first) = data.get(byte_index).copied() else { break; };
         let mut value = first >> shift;
-        if shift > 1 { if let Some(next) = data.get(byte_index + 1) { value |= next << (8 - shift); } }
+        if shift > 1 {
+            if let Some(next) = data.get(byte_index + 1) { value |= next << (8 - shift); }
+        }
         values.push(value & 0x7f);
     }
     Ok(gsm7_to_string(&values))
@@ -215,6 +226,7 @@ mod tests {
         assert_eq!(concat.total, 2);
         assert_eq!(concat.sequence, 1);
     }
+
 
     #[test]
     fn decodes_simple_ucs2_deliver() {

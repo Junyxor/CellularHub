@@ -253,6 +253,7 @@ export async function setAutostartEnabled(enabled: boolean): Promise<boolean> {
   return invoke('set_autostart_enabled', { enabled });
 }
 
+
 export async function runReleaseDiagnostics(): Promise<ReleaseDiagnostics> {
   if (!isTauri()) return {
     appVersion: '1.0.0', os: 'browser-preview', arch: 'web', dataDir: 'Preview mode',

@@ -166,6 +166,8 @@ fn command_supported(response: &str) -> bool {
 }
 
 fn extract_eid(response: &str) -> Option<String> {
+    // GSMA EIDs are 32 decimal digits. Avoid interpreting APDU status/error
+    // numbers as EIDs by requiring exactly a 32-digit token.
     response
         .split(|ch: char| !ch.is_ascii_digit())
         .find(|token| token.len() == 32)
@@ -209,6 +211,8 @@ fn windows_lpa_available() -> bool {
 
     #[cfg(target_os = "windows")]
     {
+        // Windows 11 24H2 is build 26100. `reg query` does not need elevation
+        // for this read and avoids introducing another OS-version dependency.
         let output = Command::new("reg")
             .args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "CurrentBuildNumber"])
             .output();
