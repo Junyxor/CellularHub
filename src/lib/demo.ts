@@ -1,0 +1,92 @@
+import type { AppSnapshot } from '../types';
+
+export function createDemoSnapshot(): AppSnapshot {
+  return {
+    selectedDeviceId: 'demo-native',
+    devices: [
+      {
+        id: 'demo-native',
+        label: 'Windows Mobile Broadband',
+        kind: 'demo',
+        model: 'Demo 5G Modem',
+        operator: 'CellularHub Demo',
+        signal: 82,
+        networkClass: '5G',
+        status: 'connected',
+        capabilities: {
+          smsReceive: true,
+          smsSend: false,
+          nativeEsim: true,
+          euiccBridge: false,
+        },
+      },
+    ],
+    messages: [
+      {
+        id: 'sms-1',
+        sender: '10086',
+        body: '【CellularHub】验证码 284193，5 分钟内有效。',
+        receivedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+        unread: true,
+        archived: false,
+        category: 'code',
+        code: '284193',
+      },
+      {
+        id: 'sms-2',
+        sender: '+447700900123',
+        body: 'Your monthly plan renews tomorrow. Balance is sufficient.',
+        receivedAt: new Date(Date.now() - 42 * 60_000).toISOString(),
+        unread: false,
+        archived: false,
+        category: 'billing',
+      },
+      {
+        id: 'sms-3',
+        sender: '1069',
+        body: '本月已使用流量 8.6GB，剩余 21.4GB。',
+        receivedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+        unread: false,
+        archived: false,
+        category: 'usage',
+      },
+    ],
+    esimProfiles: [
+      {
+        id: 'esim-uk',
+        name: '英国保号',
+        countryCode: 'GB',
+        operator: 'Example Mobile',
+        phoneNumber: '+44 7700 900123',
+        plan: 'Pay as you go',
+        keepAliveCost: 2,
+        currency: 'GBP',
+        billingCycle: '180 天',
+        renewalDate: new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10),
+        autoRenew: false,
+        status: 'standby',
+        notes: '主要用于验证码与账号保号。',
+        tags: ['保号', 'SMS'],
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: 'esim-us',
+        name: '美国数据卡',
+        countryCode: 'US',
+        operator: 'Demo Wireless',
+        plan: '20GB / 30 days',
+        expiryDate: new Date(Date.now() + 18 * 86_400_000).toISOString().slice(0, 10),
+        autoRenew: true,
+        status: 'active',
+        tags: ['数据', '旅行'],
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    runtime: {
+      nativeLpaAvailable: true,
+      euiccBridgeAvailable: false,
+      lpacFound: false,
+      platform: 'browser-demo',
+    },
+  };
+}
