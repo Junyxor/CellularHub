@@ -1,0 +1,59 @@
+name: Finalize exact CellularHub v1 source
+
+on:
+  push:
+    branches:
+      - import-v1.0.0
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout import branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild and verify correction archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=/tmp/correction.tar.xz.b64
+          : > "$out"
+
+          for n in 00 01 02 03 04 05; do head -c 9000 ".transfer/corrxz${n}" >> "$out"; done
+          head -c 9000 .transfer/corrxz06 >> "$out"
+          for n in 07 08 09 10 11; do head -c 9000 ".transfer/corrxz${n}" >> "$out"; done
+          head -c 6000 .transfer/corrxz12a >> "$out"
+          head -c 3000 .transfer/corrxz12b >> "$out"
+          head -c 6000 .transfer/corrxz13a >> "$out"
+          head -c 3000 .transfer/corrxz13b >> "$out"
+          head -c 4060 .transfer/corrxz14 >> "$out"
+
+          test "$(wc -c < "$out")" -eq 130060
+          base64 -d "$out" > /tmp/correction.tar.xz
+          echo 'da7d8e024f7b79c59822d5f561e5abca193218554ddfde1c39c9ecd3f575af36  /tmp/correction.tar.xz' | sha256sum -c -
+
+      - name: Restore canonical v1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xJf /tmp/correction.tar.xz -C .
+          rm -rf .transfer
+          rm -f .github/workflows/finalize-v1-import.yml
+
+      - name: Commit clean canonical source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat: finalize CellularHub 1.0.0 source'
+          git push origin HEAD:import-v1.0.0
