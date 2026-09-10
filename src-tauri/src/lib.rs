@@ -1,0 +1,145 @@
+mod model;
+mod providers;
+mod sms;
+mod state;
+mod store;
+
+use std::sync::Arc;
+
+use model::{AppSnapshot, EsimProfile};
+use state::AppState;
+use tauri::{Emitter, Manager, State};
+
+#[tauri::command]
+fn get_snapshot(state: State<'_, Arc<AppState>>) -> AppSnapshot {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn archive_message(id: String, archived: bool, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.archive_message(&id, archived)
+}
+
+#[tauri::command]
+fn mark_sender_read(sender: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.mark_sender_read(&sender)
+}
+
+#[tauri::command]
+fn upsert_esim_profile(profile: EsimProfile, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.upsert_profile(profile)
+}
+
+#[tauri::command]
+fn delete_esim_profile(id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.delete_profile(&id)
+}
+
+#[tauri::command]
+fn refresh_devices(state: State<'_, Arc<AppState>>) -> AppSnapshot {
+    state.refresh_devices()
+}
+
+#[tauri::command]
+fn poll_sms_device(device_id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.poll_sms_device(&device_id)
+}
+
+#[tauri::command]
+fn start_sms_listener(
+    device_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppSnapshot, String> {
+    let shared = (*state).clone();
+    let notify_app = app.clone();
+    let notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = notify_app.emit("cellularhub:sms-received", ());
+    });
+    shared.start_sms_listener(&device_id, notifier)
+}
+
+#[tauri::command]
+fn stop_sms_listener(device_id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.stop_sms_listener(&device_id)
+}
+
+#[tauri::command]
+fn install_esim_activation_code(code: String) -> Result<String, String> {
+    providers::launch_native_lpa(&code)
+}
+
+#[tauri::command]
+fn decode_sms_pdu(pdu: String) -> Result<sms::pdu::DecodedPdu, String> {
+    sms::pdu::decode_deliver_pdu(&pdu)
+}
+
+#[tauri::command]
+fn set_window_mode(mode: String, app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    match mode.as_str() {
+        "mini" => {
+            window.set_always_on_top(true).map_err(|error| error.to_string())?;
+            window
+                .set_size(tauri::Size::Logical(tauri::LogicalSize::new(386.0, 520.0)))
+                .map_err(|error| error.to_string())?;
+        }
+        "full" => {
+            window.set_always_on_top(false).map_err(|error| error.to_string())?;
+            window
+                .set_size(tauri::Size::Logical(tauri::LogicalSize::new(1240.0, 790.0)))
+                .map_err(|error| error.to_string())?;
+            window.center().map_err(|error| error.to_string())?;
+        }
+        _ => return Err("unknown window mode".into()),
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let store = store::Store::new(app.handle())?;
+            let state = Arc::new(AppState::new(store)?);
+            app.manage(state.clone());
+
+            // Only restore a background AT listener when the user explicitly enabled it earlier
+            // and the currently enumerated USB device matches the same VID/PID + serial identity.
+            // Plain COM-number candidates never produce a restore id.
+            if let Some(device_id) = state.opted_in_listener_restore_device_id() {
+                let restore_state = state.clone();
+                let notify_app = app.handle().clone();
+                let _ = std::thread::Builder::new()
+                    .name("cellularhub-restore-sms".into())
+                    .spawn(move || {
+                        let event_app = notify_app.clone();
+                        let notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                            let _ = event_app.emit("cellularhub:sms-received", ());
+                        });
+                        // A missing/unavailable modem must never prevent the application from
+                        // starting. Keep the saved consent so a later restart can retry.
+                        let _ = restore_state.start_sms_listener(&device_id, notifier);
+                    });
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_snapshot,
+            archive_message,
+            mark_sender_read,
+            upsert_esim_profile,
+            delete_esim_profile,
+            refresh_devices,
+            poll_sms_device,
+            start_sms_listener,
+            stop_sms_listener,
+            install_esim_activation_code,
+            decode_sms_pdu,
+            set_window_mode,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running CellularHub");
+}
