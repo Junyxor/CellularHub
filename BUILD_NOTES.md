@@ -14,25 +14,31 @@ All application source is stored as ordinary Git files.
 - Tauri/Rust command bridge and app-data store.
 - Windows CI for frontend build, cargo check/test and MSI/NSIS bundles.
 
-## Native slice implemented after recovery
+## Native / receive pipeline implemented after recovery
 
 - Corrected the Windows Rust binding feature from `WindowsConnectionManager` to `MobileBroadband`.
-- `IMbnInterfaceManager::GetInterfaces` now enumerates real Windows Mobile Broadband interfaces.
-- MBN interface capability data now exposes manufacturer/model, registration/provider, data class and signal strength.
-- `smsReceive` is only true when the interface advertises `MBN_SMS_CAPS_PDU_RECEIVE`; outbound SMS remains disabled.
-- COM apartment ownership, SAFEARRAY destruction and capability BSTR cleanup are explicit so repeated refreshes do not leak native allocations.
+- `IMbnInterfaceManager::GetInterfaces` enumerates real Windows Mobile Broadband interfaces.
+- MBN capability data exposes manufacturer/model, registration/provider, data class and signal strength.
+- `smsReceive` is only true when the MBN interface advertises `MBN_SMS_CAPS_PDU_RECEIVE`; outbound SMS remains disabled.
+- COM apartment ownership, SAFEARRAY destruction and capability BSTR cleanup are explicit.
 - `lpa:` launch no longer goes through `cmd /C start`; Windows Explorer receives the URI directly.
-- AT fallback protocol primitives now parse `+CMTI`, `+CSQ`, `+COPS` and define text/PDU receive-only initialization sequences.
-- Shared SMS PDU code now covers GSM 7-bit unpacking, UCS-2, numeric/alphanumeric senders, 8-bit payloads, timestamps and 8/16-bit concatenation UDH metadata.
-- Parser/unit tests are included so CI can catch regressions before modem-specific testing.
+- Windows serial/USB candidates are now enumerated passively as AT fallback devices. Port presence alone does not mark SMS as supported.
+- An explicit `poll_sms_device` command opens an AT candidate, probes common modem baud rates, reads operator/signal, enables text SMS when possible and falls back to PDU mode otherwise.
+- The AT path executes receive-only `CMGF`, `CNMI` and `CMGL`; there is no `CMGS` send command.
+- Text-mode `+CMGL` records and PDU-mode records are converted into one `IncomingSms` representation.
+- Shared PDU code covers GSM 7-bit, UCS-2, numeric/alphanumeric senders, 8-bit payloads and 8/16-bit concatenation UDH metadata.
+- Multipart SMS is assembled by sender/reference/part count before persistence. Incomplete groups expire after 12 hours.
+- Provider records receive deterministic UUID v5 identities, so repeated polling does not duplicate already persisted SMS.
+- Verification-code extraction is gated on local semantic keywords before accepting 4-8 digit runs; billing/renewal and usage categories are also classified locally.
+- `messages.json` remains newest-first and now correctly retains the newest 1000 entries rather than the oldest tail.
 
 ## Hardware work still deliberately incomplete
 
-1. Wire `IMbnSms::SmsRead` and `IMbnSmsEvents` connection-point callbacks into the persistent SMS store.
-2. Add Windows COM-port discovery/ownership and execute the AT CMGF/CNMI/CMTI/CMGR/CMGL receive state machine.
-3. Add multipart assembly across received PDUs and duplicate suppression before persistence/notification.
+1. Wire `IMbnSms::SmsRead` and the `IMbnSmsEvents` connection-point completion sink into the same `IncomingSms` pipeline. MBN reads are asynchronous and are not faked as synchronous calls.
+2. Promote the explicit AT poll into a long-lived receive session that reacts to `+CMTI` and uses `CMGR` immediately instead of relying only on `CMGL` polling.
+3. Add UI controls for explicitly selecting/testing an AT port and surface provider diagnostics without automatically stealing arbitrary COM ports.
 4. Probe real eUICC/EID capability read-only and only then enable guarded lpac APDU transport.
 5. Finish tray/autostart/single-instance and native notification routing.
 6. Validate MBN and AT paths on multiple real modems before exposing SMS send.
 
-The UI capability badges remain conservative: MBN presence does not imply eSIM support, and lpac being present does not imply a real eUICC bridge exists.
+The UI capability badges remain conservative: MBN presence does not imply eSIM support, serial-port presence does not imply SMS support, and lpac being present does not imply a real eUICC bridge exists.

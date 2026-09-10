@@ -5,6 +5,7 @@ mod state;
 mod store;
 
 use std::sync::Arc;
+
 use model::{AppSnapshot, EsimProfile};
 use state::AppState;
 use tauri::{Manager, State};
@@ -40,6 +41,11 @@ fn refresh_devices(state: State<'_, Arc<AppState>>) -> AppSnapshot {
 }
 
 #[tauri::command]
+fn poll_sms_device(device_id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.poll_sms_device(&device_id)
+}
+
+#[tauri::command]
 fn install_esim_activation_code(code: String) -> Result<String, String> {
     providers::launch_native_lpa(&code)
 }
@@ -51,16 +57,22 @@ fn decode_sms_pdu(pdu: String) -> Result<sms::pdu::DecodedPdu, String> {
 
 #[tauri::command]
 fn set_window_mode(mode: String, app: tauri::AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
     match mode.as_str() {
         "mini" => {
-            window.set_always_on_top(true).map_err(|e| e.to_string())?;
-            window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(386.0, 520.0))).map_err(|e| e.to_string())?;
+            window.set_always_on_top(true).map_err(|error| error.to_string())?;
+            window
+                .set_size(tauri::Size::Logical(tauri::LogicalSize::new(386.0, 520.0)))
+                .map_err(|error| error.to_string())?;
         }
         "full" => {
-            window.set_always_on_top(false).map_err(|e| e.to_string())?;
-            window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1240.0, 790.0))).map_err(|e| e.to_string())?;
-            window.center().map_err(|e| e.to_string())?;
+            window.set_always_on_top(false).map_err(|error| error.to_string())?;
+            window
+                .set_size(tauri::Size::Logical(tauri::LogicalSize::new(1240.0, 790.0)))
+                .map_err(|error| error.to_string())?;
+            window.center().map_err(|error| error.to_string())?;
         }
         _ => return Err("unknown window mode".into()),
     }
@@ -83,6 +95,7 @@ pub fn run() {
             upsert_esim_profile,
             delete_esim_profile,
             refresh_devices,
+            poll_sms_device,
             install_esim_activation_code,
             decode_sms_pdu,
             set_window_mode,

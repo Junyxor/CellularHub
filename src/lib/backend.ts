@@ -78,3 +78,8 @@ export async function refreshDevices(): Promise<AppSnapshot> {
   if (!isTauriRuntime()) return structuredClone(browserSnapshot);
   return invoke<AppSnapshot>('refresh_devices');
 }
+
+export async function pollSmsDevice(deviceId: string): Promise<AppSnapshot> {
+  if (!isTauriRuntime()) return structuredClone(browserSnapshot);
+  return invoke<AppSnapshot>('poll_sms_device', { deviceId });
+}

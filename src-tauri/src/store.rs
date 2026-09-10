@@ -1,4 +1,8 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use serde::{de::DeserializeOwned, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -11,8 +15,8 @@ pub struct Store {
 
 impl Store {
     pub fn new(app: &AppHandle) -> Result<Self, String> {
-        let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         Ok(Self { root })
     }
 
@@ -24,19 +28,19 @@ impl Store {
         if !path.exists() {
             return Ok(T::default());
         }
-        let bytes = fs::read(path).map_err(|e| e.to_string())?;
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())
     }
 
     fn write_json<T: Serialize + ?Sized>(&self, name: &str, value: &T) -> Result<(), String> {
         let path = self.root.join(name);
         let tmp = path.with_extension("tmp");
-        let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-        fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+        fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
         if path.exists() {
-            fs::remove_file(&path).map_err(|e| e.to_string())?;
+            fs::remove_file(&path).map_err(|error| error.to_string())?;
         }
-        fs::rename(tmp, path).map_err(|e| e.to_string())
+        fs::rename(tmp, path).map_err(|error| error.to_string())
     }
 
     pub fn load_messages(&self) -> Result<Vec<SmsMessage>, String> {
@@ -44,7 +48,12 @@ impl Store {
     }
 
     pub fn save_messages(&self, messages: &[SmsMessage]) -> Result<(), String> {
-        let capped = if messages.len() > 1000 { &messages[messages.len()-1000..] } else { messages };
+        // Messages are stored newest-first, so keep the head rather than the oldest tail.
+        let capped = if messages.len() > 1000 {
+            &messages[..1000]
+        } else {
+            messages
+        };
         self.write_json("messages.json", capped)
     }
 
@@ -56,5 +65,7 @@ impl Store {
         self.write_json("esim-profiles.json", profiles)
     }
 
-    pub fn root(&self) -> &Path { &self.root }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
