@@ -36,14 +36,19 @@ All application source is stored as ordinary Git files.
 - Provider records receive deterministic UUID v5 identities, so repeated polling does not duplicate already persisted SMS.
 - Verification-code extraction is gated on local semantic keywords before accepting 4-8 digit runs; billing/renewal and usage categories are also classified locally.
 - `messages.json` remains newest-first and correctly retains the newest 1000 entries.
+- Receive preferences are saved to local `preferences.json`. Successful explicit tests remember a device only when it has a stable identity.
+- Background-receive consent is persisted only for USB AT devices that expose VID/PID plus a non-empty serial number. A bare `COM3`-style identity is never sufficient for auto-open.
+- On restart, the saved physical USB identity is resolved back to the current COM number. The listener is restored only after that stable match, so COM renumbering is supported without risking ownership of an unrelated serial device.
+- Explicitly stopping background receive clears the persisted auto-receive consent. Restore failures do not block application startup.
+- Fixed a listener-state self-deadlock where asking to start an already active device could call `snapshot()` while holding the listener mutex.
+- Windows bundling explicitly uses `src-tauri/icons/icon.ico`; the earlier empty `bundle.icon` recovery setting no longer hides the restored icon from WiX/NSIS.
 
 ## Hardware work still deliberately incomplete
 
 1. Wire `IMbnSms::SmsRead` and the `IMbnSmsEvents` connection-point completion sink into the same `IncomingSms` pipeline. MBN reads are asynchronous and are not faked as synchronous calls.
-2. Persist the user's preferred receive device and explicit background-listener preference; AT ports still must never be auto-opened without prior opt-in.
-3. Decode AT text-mode SCTS timezone exactly instead of replacing it with ingestion time.
-4. Probe real eUICC/EID capability read-only and only then enable guarded lpac APDU transport.
-5. Finish tray/autostart/single-instance and native notification routing.
-6. Validate MBN and AT paths on multiple real modems before exposing SMS send.
+2. Decode AT text-mode SCTS timezone exactly instead of replacing it with ingestion time.
+3. Probe real eUICC/EID capability read-only and only then enable guarded lpac APDU transport.
+4. Finish tray/autostart/single-instance and native notification routing.
+5. Validate MBN and AT paths on multiple real modems before exposing SMS send.
 
 The UI capability badges remain conservative: MBN presence does not imply eSIM support, serial-port presence does not imply SMS support, and lpac being present does not imply a real eUICC bridge exists.

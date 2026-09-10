@@ -4,7 +4,7 @@ use crate::{
     model::{AppSnapshot, EsimProfile, SmsMessage},
     providers,
     sms::inbox::{message_from_complete, IncomingSms, MultipartAssembler},
-    store::Store,
+    store::{AppPreferences, Store},
 };
 
 pub struct AppState {
@@ -18,6 +18,7 @@ struct InnerState {
     selected_device_id: Option<String>,
     messages: Vec<SmsMessage>,
     profiles: Vec<EsimProfile>,
+    preferences: AppPreferences,
     assembler: MultipartAssembler,
 }
 
@@ -31,14 +32,19 @@ impl AppState {
         let mut messages = store.load_messages()?;
         messages.sort_by(|a, b| b.received_at.cmp(&a.received_at));
         let profiles = store.load_profiles()?;
+        let preferences = store.load_preferences()?;
         let devices = providers::enumerate_devices();
-        let selected_device_id = preferred_device_id(&devices);
+        let selected_device_id = preferred_device_id(
+            &devices,
+            preferences.preferred_receive_hardware_key.as_deref(),
+        );
         Ok(Self {
             inner: Mutex::new(InnerState {
                 devices,
                 selected_device_id,
                 messages,
                 profiles,
+                preferences,
                 assembler: MultipartAssembler::default(),
             }),
             listener: Mutex::new(None),
@@ -69,6 +75,23 @@ impl AppState {
             esim_profiles,
             runtime: providers::detect_runtime_capabilities(),
         }
+    }
+
+    pub fn opted_in_listener_restore_device_id(&self) -> Option<String> {
+        let (key, device_ids) = {
+            let guard = self.inner.lock().ok()?;
+            let key = guard.preferences.background_sms_hardware_key.clone()?;
+            let ids = guard
+                .devices
+                .iter()
+                .filter(|device| device.kind == "at")
+                .map(|device| device.id.clone())
+                .collect::<Vec<_>>();
+            (key, ids)
+        };
+        device_ids.into_iter().find(|device_id| {
+            providers::stable_hardware_key(device_id).as_deref() == Some(key.as_str())
+        })
     }
 
     pub fn archive_message(&self, id: &str, archived: bool) -> Result<AppSnapshot, String> {
@@ -124,6 +147,7 @@ impl AppState {
         let mut guard = self.inner.lock().expect("state poisoned");
         let previous = guard.devices.clone();
         let previous_selected = guard.selected_device_id.clone();
+        let preferred_key = guard.preferences.preferred_receive_hardware_key.clone();
         guard.devices = refreshed;
 
         // A successful AT probe remains trusted for this process lifetime even after a passive refresh.
@@ -148,7 +172,7 @@ impl AppState {
 
         guard.selected_device_id = previous_selected
             .filter(|id| guard.devices.iter().any(|device| &device.id == id))
-            .or_else(|| preferred_device_id(&guard.devices));
+            .or_else(|| preferred_device_id(&guard.devices, preferred_key.as_deref()));
         drop(guard);
         self.snapshot()
     }
@@ -156,10 +180,18 @@ impl AppState {
     pub fn poll_sms_device(&self, device_id: &str) -> Result<AppSnapshot, String> {
         // Serial/COM I/O is deliberately outside the state mutex so the UI can still read snapshots.
         let poll = providers::read_sms(device_id)?;
-        {
+        let stable_key = providers::stable_hardware_key(device_id);
+        let preferences_to_save = {
             let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
             mark_device_connected(&mut guard.devices, device_id, poll.operator, poll.signal);
             guard.selected_device_id = Some(device_id.to_string());
+            stable_key.map(|key| {
+                guard.preferences.preferred_receive_hardware_key = Some(key);
+                guard.preferences.clone()
+            })
+        };
+        if let Some(preferences) = preferences_to_save {
+            self.store.save_preferences(&preferences)?;
         }
         for incoming in poll.messages {
             self.ingest_incoming(incoming)?;
@@ -210,6 +242,25 @@ impl AppState {
             }
         })?;
 
+        let stable_key = providers::stable_hardware_key(device_id);
+        let preferences = {
+            let guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
+            let mut preferences = guard.preferences.clone();
+            if let Some(key) = stable_key {
+                preferences.preferred_receive_hardware_key = Some(key.clone());
+                preferences.background_sms_hardware_key = Some(key);
+            } else {
+                // A plain COM number is not safe to auto-open on a future boot. Also clear any
+                // previous auto-receive consent so enabling an unstable port cannot resurrect an
+                // older physical device after restart.
+                preferences.background_sms_hardware_key = None;
+            }
+            preferences
+        };
+        // Persist consent before publishing the listener as active. If this write fails, the local
+        // started handle drops here and cleanly releases the serial port.
+        self.store.save_preferences(&preferences)?;
+
         {
             let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
             mark_device_connected(
@@ -219,6 +270,7 @@ impl AppState {
                 started.signal,
             );
             guard.selected_device_id = Some(device_id.to_string());
+            guard.preferences = preferences;
         }
         {
             let mut listener = self
@@ -244,11 +296,26 @@ impl AppState {
                 _ => None,
             }
         };
+        if stopped.is_none() {
+            return Ok(self.snapshot());
+        }
         drop(stopped);
-        if let Ok(mut guard) = self.inner.lock() {
+
+        let stable_key = providers::stable_hardware_key(device_id);
+        let preferences_to_save = {
+            let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
             if let Some(device) = guard.devices.iter_mut().find(|device| device.id == device_id) {
                 device.status = "available".into();
             }
+            if stable_key.as_deref() == guard.preferences.background_sms_hardware_key.as_deref() {
+                guard.preferences.background_sms_hardware_key = None;
+                Some(guard.preferences.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(preferences) = preferences_to_save {
+            self.store.save_preferences(&preferences)?;
         }
         Ok(self.snapshot())
     }
@@ -287,7 +354,17 @@ fn mark_device_connected(
     }
 }
 
-fn preferred_device_id(devices: &[crate::model::CellularDevice]) -> Option<String> {
+fn preferred_device_id(
+    devices: &[crate::model::CellularDevice],
+    preferred_hardware_key: Option<&str>,
+) -> Option<String> {
+    if let Some(key) = preferred_hardware_key {
+        if let Some(device) = devices.iter().find(|device| {
+            providers::stable_hardware_key(&device.id).as_deref() == Some(key)
+        }) {
+            return Some(device.id.clone());
+        }
+    }
     devices
         .iter()
         .find(|device| device.kind == "windows-mbn" && device.capabilities.sms_receive)
@@ -301,7 +378,7 @@ mod tests {
     use crate::model::{CellularDevice, DeviceCapabilities};
 
     #[test]
-    fn native_receive_capable_device_is_preferred() {
+    fn native_receive_capable_device_is_preferred_without_saved_choice() {
         let at = CellularDevice {
             id: "at:COM3".into(),
             label: "AT".into(),
@@ -322,6 +399,6 @@ mod tests {
         mbn.id = "mbn:test".into();
         mbn.kind = "windows-mbn".into();
         mbn.capabilities.sms_receive = true;
-        assert_eq!(preferred_device_id(&[at, mbn]), Some("mbn:test".into()));
+        assert_eq!(preferred_device_id(&[at, mbn], None), Some("mbn:test".into()));
     }
 }

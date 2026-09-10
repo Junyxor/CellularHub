@@ -104,7 +104,26 @@ pub fn run() {
         .setup(|app| {
             let store = store::Store::new(app.handle())?;
             let state = Arc::new(AppState::new(store)?);
-            app.manage(state);
+            app.manage(state.clone());
+
+            // Only restore a background AT listener when the user explicitly enabled it earlier
+            // and the currently enumerated USB device matches the same VID/PID + serial identity.
+            // Plain COM-number candidates never produce a restore id.
+            if let Some(device_id) = state.opted_in_listener_restore_device_id() {
+                let restore_state = state.clone();
+                let notify_app = app.handle().clone();
+                let _ = std::thread::Builder::new()
+                    .name("cellularhub-restore-sms".into())
+                    .spawn(move || {
+                        let event_app = notify_app.clone();
+                        let notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                            let _ = event_app.emit("cellularhub:sms-received", ());
+                        });
+                        // A missing/unavailable modem must never prevent the application from
+                        // starting. Keep the saved consent so a later restart can retry.
+                        let _ = restore_state.start_sms_listener(&device_id, notifier);
+                    });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -3,10 +3,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::model::{EsimProfile, SmsMessage};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppPreferences {
+    pub preferred_receive_hardware_key: Option<String>,
+    pub background_sms_hardware_key: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -63,6 +70,14 @@ impl Store {
 
     pub fn save_profiles(&self, profiles: &[EsimProfile]) -> Result<(), String> {
         self.write_json("esim-profiles.json", profiles)
+    }
+
+    pub fn load_preferences(&self) -> Result<AppPreferences, String> {
+        self.read_json("preferences.json")
+    }
+
+    pub fn save_preferences(&self, preferences: &AppPreferences) -> Result<(), String> {
+        self.write_json("preferences.json", preferences)
     }
 
     pub fn root(&self) -> &Path {

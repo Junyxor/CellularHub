@@ -1,11 +1,13 @@
 pub(crate) mod at;
 mod demo;
+mod identity;
 mod windows;
 
 use crate::{model::CellularDevice, sms::inbox::IncomingSms};
 
 pub use at::{AtListenerHandle as SmsListenerHandle, AtListenerStarted};
 pub use demo::demo_device;
+pub use identity::stable_hardware_key;
 pub use windows::{detect_runtime_capabilities, launch_native_lpa};
 
 #[derive(Debug, Clone, Default)]
