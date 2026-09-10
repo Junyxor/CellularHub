@@ -4,6 +4,7 @@ mod windows;
 
 use crate::{model::CellularDevice, sms::inbox::IncomingSms};
 
+pub use at::{AtListenerHandle as SmsListenerHandle, AtListenerStarted};
 pub use demo::demo_device;
 pub use windows::{detect_runtime_capabilities, launch_native_lpa};
 
@@ -33,6 +34,22 @@ pub fn read_sms(device_id: &str) -> Result<ProviderPoll, String> {
     if device_id.starts_with("mbn:") {
         return Err(
             "Windows MBN SMS receive is asynchronous; the IMbnSmsEvents completion sink is not wired yet"
+                .into(),
+        );
+    }
+    Err("unknown cellular provider device id".into())
+}
+
+pub fn start_sms_listener<F>(device_id: &str, on_message: F) -> Result<AtListenerStarted, String>
+where
+    F: Fn(IncomingSms) + Send + 'static,
+{
+    if device_id.starts_with("at:") {
+        return at::start_listener(device_id, on_message);
+    }
+    if device_id.starts_with("mbn:") {
+        return Err(
+            "Windows MBN listener requires the dedicated COM event worker and is not wired yet"
                 .into(),
         );
     }
