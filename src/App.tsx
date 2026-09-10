@@ -29,6 +29,7 @@ import {
   getSnapshot,
   installEsimActivationCode,
   markSenderRead,
+  pollSmsDevice,
   refreshDevices,
   setWindowMode,
   upsertEsimProfile,
@@ -359,13 +360,36 @@ function EsimPage({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot:
 
 function Devices({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot: (value: AppSnapshot) => void }) {
   const [refreshing, setRefreshing] = useState(false);
+  const [pollingId, setPollingId] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState('');
+
   const refresh = async () => {
     setRefreshing(true);
-    try { onSnapshot(await refreshDevices()); } finally { setRefreshing(false); }
+    setDiagnostic('');
+    try { onSnapshot(await refreshDevices()); }
+    finally { setRefreshing(false); }
   };
+
+  const poll = async (deviceId: string) => {
+    setPollingId(deviceId);
+    setDiagnostic('');
+    const previousCount = snapshot.messages.length;
+    try {
+      const next = await pollSmsDevice(deviceId);
+      onSnapshot(next);
+      const added = Math.max(0, next.messages.length - previousCount);
+      setDiagnostic(added > 0 ? `读取成功：新增 ${added} 条短信。` : '连接与 SMS 读取测试成功，没有发现新的短信。');
+    } catch (error) {
+      setDiagnostic(`读取失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPollingId(null);
+    }
+  };
+
   return (
     <div className="devices-page">
-      <div className="section-heading"><div><h2>蜂窝设备与能力</h2><p>Windows Native 优先，AT 只作为 SMS 兼容层，不伪造 eUICC。</p></div><button className="secondary" onClick={refresh}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />重新扫描</button></div>
+      <div className="section-heading"><div><h2>蜂窝设备与能力</h2><p>Windows Native 优先；AT 端口只在你明确点击测试时打开，不会后台抢占 COM 口。</p></div><button className="secondary" onClick={refresh} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />重新扫描</button></div>
+      {diagnostic ? <p className="muted">{diagnostic}</p> : null}
       <div className="device-grid">
         {snapshot.devices.map((device) => (
           <article className="device-card glass-card" key={device.id}>
@@ -377,6 +401,12 @@ function Devices({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot: 
               <span className={device.capabilities.smsSend ? 'ok' : ''}>SMS 发送</span>
               <span className={device.capabilities.nativeEsim ? 'ok' : ''}>Windows LPA</span>
               <span className={device.capabilities.euiccBridge ? 'ok' : ''}>eUICC Bridge</span>
+              {device.kind === 'at' ? (
+                <button className="secondary" disabled={pollingId !== null} onClick={() => poll(device.id)}>
+                  <RefreshCw size={14} className={pollingId === device.id ? 'spin' : ''} />
+                  {pollingId === device.id ? '正在测试并读取' : device.capabilities.smsReceive ? '读取新短信' : '测试并读取短信'}
+                </button>
+              ) : null}
             </div>
           </article>
         ))}
