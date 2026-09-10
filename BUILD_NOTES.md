@@ -26,21 +26,21 @@ All application source is stored as ordinary Git files.
 - Explicit AT testing opens the chosen port, probes common baud rates, reads operator/signal, enables text SMS when possible and falls back to PDU mode otherwise.
 - The AT path executes receive-only `CMGF`, `CNMI`, `CMGL` and `CMGR`; there is no `CMGS` send command.
 - A long-lived AT worker can own the explicitly selected COM port, react to `+CMTI`, immediately read the indexed message with `CMGR`, and fall back to an unread `CMGL` scan every 30 seconds.
-- Starting a different AT listener first stops and joins the previous worker, so two CellularHub workers cannot contend for two selected ports accidentally.
+- Starting a different AT listener first stops and joins the previous worker, so CellularHub has only one serial SMS owner at a time.
 - Background provider messages feed the same multipart assembler, deterministic duplicate filter, classifier and `messages.json` persistence path as manual polling.
-- Tauri emits `cellularhub:sms-received` after a newly persisted background SMS so the frontend can refresh without polling the entire app continuously.
+- Tauri emits `cellularhub:sms-received` after a newly persisted background SMS; full and mini UI subscribe to the same snapshot refresh path.
+- The device page exposes explicit `测试并读取短信`, `开启后台接收` and `停止后台接收`; arbitrary serial ports are never opened merely because they were discovered.
 - Text-mode records and PDU-mode records are converted into one `IncomingSms` representation.
 - Shared PDU code covers GSM 7-bit, UCS-2, numeric/alphanumeric senders, 8-bit payloads and 8/16-bit concatenation UDH metadata.
 - Multipart SMS is assembled by sender/reference/part count before persistence. Incomplete groups expire after 12 hours.
 - Provider records receive deterministic UUID v5 identities, so repeated polling does not duplicate already persisted SMS.
 - Verification-code extraction is gated on local semantic keywords before accepting 4-8 digit runs; billing/renewal and usage categories are also classified locally.
 - `messages.json` remains newest-first and correctly retains the newest 1000 entries.
-- The device UI already exposes explicit AT testing/reading; arbitrary serial ports are never opened merely because they were discovered.
 
 ## Hardware work still deliberately incomplete
 
 1. Wire `IMbnSms::SmsRead` and the `IMbnSmsEvents` connection-point completion sink into the same `IncomingSms` pipeline. MBN reads are asynchronous and are not faked as synchronous calls.
-2. Expose the long-lived AT listener as an explicit UI start/stop control and show its live ownership/diagnostics state.
+2. Persist the user's preferred receive device and explicit background-listener preference; AT ports still must never be auto-opened without prior opt-in.
 3. Decode AT text-mode SCTS timezone exactly instead of replacing it with ingestion time.
 4. Probe real eUICC/EID capability read-only and only then enable guarded lpac APDU transport.
 5. Finish tray/autostart/single-instance and native notification routing.

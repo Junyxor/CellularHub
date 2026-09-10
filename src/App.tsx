@@ -32,6 +32,9 @@ import {
   pollSmsDevice,
   refreshDevices,
   setWindowMode,
+  startSmsListener,
+  stopSmsListener,
+  subscribeSmsReceived,
   upsertEsimProfile,
 } from './lib/backend';
 import type { AppSnapshot, EsimProfile, SmsMessage } from './types';
@@ -125,6 +128,21 @@ export default function App() {
     getSnapshot()
       .then(setSnapshot)
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    subscribeSmsReceived((next) => {
+      if (!disposed) setSnapshot(next);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   const setMode = async (nextMini: boolean) => {
@@ -361,6 +379,7 @@ function EsimPage({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot:
 function Devices({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot: (value: AppSnapshot) => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [pollingId, setPollingId] = useState<string | null>(null);
+  const [listenerBusyId, setListenerBusyId] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState('');
 
   const refresh = async () => {
@@ -386,30 +405,59 @@ function Devices({ snapshot, onSnapshot }: { snapshot: AppSnapshot; onSnapshot: 
     }
   };
 
+  const toggleListener = async (deviceId: string) => {
+    const active = snapshot.activeSmsListenerDeviceId === deviceId;
+    setListenerBusyId(deviceId);
+    setDiagnostic('');
+    try {
+      const next = active ? await stopSmsListener(deviceId) : await startSmsListener(deviceId);
+      onSnapshot(next);
+      setDiagnostic(active
+        ? '后台短信接收已停止，串口已经释放。'
+        : '后台短信接收已开启：优先监听 +CMTI，并定期扫描未读短信兜底。');
+    } catch (error) {
+      setDiagnostic(`后台接收切换失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setListenerBusyId(null);
+    }
+  };
+
   return (
     <div className="devices-page">
-      <div className="section-heading"><div><h2>蜂窝设备与能力</h2><p>Windows Native 优先；AT 端口只在你明确点击测试时打开，不会后台抢占 COM 口。</p></div><button className="secondary" onClick={refresh} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />重新扫描</button></div>
+      <div className="section-heading"><div><h2>蜂窝设备与能力</h2><p>Windows Native 优先；AT 端口只会在你明确测试或开启后台接收时打开。</p></div><button className="secondary" onClick={refresh} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />重新扫描</button></div>
       {diagnostic ? <p className="muted">{diagnostic}</p> : null}
       <div className="device-grid">
-        {snapshot.devices.map((device) => (
-          <article className="device-card glass-card" key={device.id}>
-            <div className="device-icon"><Gauge /></div>
-            <div className="grow"><div className="device-title"><h3>{device.label}</h3><span className={`status-dot ${device.status}`} /></div><p>{device.model ?? device.kind}</p><strong>{device.operator ?? '未注册网络'}</strong></div>
-            <div className="device-signal"><Signal size={16} /><strong>{device.signal ?? 0}%</strong><span>{device.networkClass ?? '—'}</span></div>
-            <div className="cap-grid">
-              <span className={device.capabilities.smsReceive ? 'ok' : ''}>SMS 接收</span>
-              <span className={device.capabilities.smsSend ? 'ok' : ''}>SMS 发送</span>
-              <span className={device.capabilities.nativeEsim ? 'ok' : ''}>Windows LPA</span>
-              <span className={device.capabilities.euiccBridge ? 'ok' : ''}>eUICC Bridge</span>
-              {device.kind === 'at' ? (
-                <button className="secondary" disabled={pollingId !== null} onClick={() => poll(device.id)}>
-                  <RefreshCw size={14} className={pollingId === device.id ? 'spin' : ''} />
-                  {pollingId === device.id ? '正在测试并读取' : device.capabilities.smsReceive ? '读取新短信' : '测试并读取短信'}
-                </button>
-              ) : null}
-            </div>
-          </article>
-        ))}
+        {snapshot.devices.map((device) => {
+          const listening = snapshot.activeSmsListenerDeviceId === device.id;
+          return (
+            <article className="device-card glass-card" key={device.id}>
+              <div className="device-icon"><Gauge /></div>
+              <div className="grow"><div className="device-title"><h3>{device.label}</h3><span className={`status-dot ${device.status}`} /></div><p>{device.model ?? device.kind}</p><strong>{device.operator ?? '未注册网络'}</strong></div>
+              <div className="device-signal"><Signal size={16} /><strong>{device.signal ?? 0}%</strong><span>{device.networkClass ?? '—'}</span></div>
+              <div className="cap-grid">
+                <span className={device.capabilities.smsReceive ? 'ok' : ''}>SMS 接收</span>
+                <span className={device.capabilities.smsSend ? 'ok' : ''}>SMS 发送</span>
+                <span className={device.capabilities.nativeEsim ? 'ok' : ''}>Windows LPA</span>
+                <span className={device.capabilities.euiccBridge ? 'ok' : ''}>eUICC Bridge</span>
+                {listening ? <span className="ok">后台接收中</span> : null}
+                {device.kind === 'at' ? (
+                  <>
+                    <button className="secondary" disabled={pollingId !== null || listenerBusyId !== null || listening} onClick={() => poll(device.id)}>
+                      <RefreshCw size={14} className={pollingId === device.id ? 'spin' : ''} />
+                      {pollingId === device.id ? '正在测试并读取' : device.capabilities.smsReceive ? '读取新短信' : '测试并读取短信'}
+                    </button>
+                    {device.capabilities.smsReceive || listening ? (
+                      <button className={listening ? 'primary' : 'secondary'} disabled={listenerBusyId !== null || pollingId !== null} onClick={() => toggleListener(device.id)}>
+                        <Signal size={14} />
+                        {listenerBusyId === device.id ? '正在切换' : listening ? '停止后台接收' : '开启后台接收'}
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            </article>
+          );
+        })}
         {!snapshot.devices.length ? <div className="empty-state glass-card">没有发现蜂窝设备。仍可管理已有 eSIM 档案，但无法凭空接收短信或安装 eSIM。</div> : null}
       </div>
     </div>
