@@ -62,6 +62,7 @@ export interface RuntimeCapabilities {
 export interface AppSnapshot {
   devices: CellularDevice[];
   selectedDeviceId?: string;
+  activeSmsListenerDeviceId?: string;
   messages: SmsMessage[];
   esimProfiles: EsimProfile[];
   runtime: RuntimeCapabilities;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use model::{AppSnapshot, EsimProfile};
 use state::AppState;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
 fn get_snapshot(state: State<'_, Arc<AppState>>) -> AppSnapshot {
@@ -43,6 +43,25 @@ fn refresh_devices(state: State<'_, Arc<AppState>>) -> AppSnapshot {
 #[tauri::command]
 fn poll_sms_device(device_id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
     state.poll_sms_device(&device_id)
+}
+
+#[tauri::command]
+fn start_sms_listener(
+    device_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppSnapshot, String> {
+    let shared = (*state).clone();
+    let notify_app = app.clone();
+    let notifier: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = notify_app.emit("cellularhub:sms-received", ());
+    });
+    shared.start_sms_listener(&device_id, notifier)
+}
+
+#[tauri::command]
+fn stop_sms_listener(device_id: String, state: State<'_, Arc<AppState>>) -> Result<AppSnapshot, String> {
+    state.stop_sms_listener(&device_id)
 }
 
 #[tauri::command]
@@ -96,6 +115,8 @@ pub fn run() {
             delete_esim_profile,
             refresh_devices,
             poll_sms_device,
+            start_sms_listener,
+            stop_sms_listener,
             install_esim_activation_code,
             decode_sms_pdu,
             set_window_mode,

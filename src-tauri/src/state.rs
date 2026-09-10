@@ -1,14 +1,15 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     model::{AppSnapshot, EsimProfile, SmsMessage},
     providers,
-    sms::inbox::{message_from_complete, MultipartAssembler},
+    sms::inbox::{message_from_complete, IncomingSms, MultipartAssembler},
     store::Store,
 };
 
 pub struct AppState {
     inner: Mutex<InnerState>,
+    listener: Mutex<Option<ActiveSmsListener>>,
     store: Store,
 }
 
@@ -18,6 +19,11 @@ struct InnerState {
     messages: Vec<SmsMessage>,
     profiles: Vec<EsimProfile>,
     assembler: MultipartAssembler,
+}
+
+struct ActiveSmsListener {
+    device_id: String,
+    _handle: providers::SmsListenerHandle,
 }
 
 impl AppState {
@@ -35,17 +41,32 @@ impl AppState {
                 profiles,
                 assembler: MultipartAssembler::default(),
             }),
+            listener: Mutex::new(None),
             store,
         })
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
-        let guard = self.inner.lock().expect("state poisoned");
+        let (devices, selected_device_id, messages, esim_profiles) = {
+            let guard = self.inner.lock().expect("state poisoned");
+            (
+                guard.devices.clone(),
+                guard.selected_device_id.clone(),
+                guard.messages.clone(),
+                guard.profiles.clone(),
+            )
+        };
+        let active_sms_listener_device_id = self
+            .listener
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|listener| listener.device_id.clone()));
         AppSnapshot {
-            devices: guard.devices.clone(),
-            selected_device_id: guard.selected_device_id.clone(),
-            messages: guard.messages.clone(),
-            esim_profiles: guard.profiles.clone(),
+            devices,
+            selected_device_id,
+            active_sms_listener_device_id,
+            messages,
+            esim_profiles,
             runtime: providers::detect_runtime_capabilities(),
         }
     }
@@ -95,6 +116,11 @@ impl AppState {
 
     pub fn refresh_devices(&self) -> AppSnapshot {
         let refreshed = providers::enumerate_devices();
+        let active = self
+            .listener
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|listener| listener.device_id.clone()));
         let mut guard = self.inner.lock().expect("state poisoned");
         let previous = guard.devices.clone();
         let previous_selected = guard.selected_device_id.clone();
@@ -105,11 +131,18 @@ impl AppState {
             if device.kind != "at" {
                 continue;
             }
-            if let Some(old) = previous.iter().find(|old| old.id == device.id && old.capabilities.sms_receive) {
+            if let Some(old) = previous
+                .iter()
+                .find(|old| old.id == device.id && old.capabilities.sms_receive)
+            {
                 device.capabilities.sms_receive = true;
                 device.status = old.status.clone();
                 device.operator = old.operator.clone();
                 device.signal = old.signal;
+            }
+            if active.as_deref() == Some(device.id.as_str()) {
+                device.status = "connected".into();
+                device.capabilities.sms_receive = true;
             }
         }
 
@@ -123,36 +156,125 @@ impl AppState {
     pub fn poll_sms_device(&self, device_id: &str) -> Result<AppSnapshot, String> {
         // Serial/COM I/O is deliberately outside the state mutex so the UI can still read snapshots.
         let poll = providers::read_sms(device_id)?;
-        let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
-
-        if let Some(device) = guard.devices.iter_mut().find(|device| device.id == device_id) {
-            device.status = "connected".into();
-            device.capabilities.sms_receive = true;
-            if poll.operator.is_some() {
-                device.operator = poll.operator.clone();
-            }
-            if poll.signal.is_some() {
-                device.signal = poll.signal;
-            }
+        {
+            let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
+            mark_device_connected(&mut guard.devices, device_id, poll.operator, poll.signal);
+            guard.selected_device_id = Some(device_id.to_string());
         }
-        guard.selected_device_id = Some(device_id.to_string());
-
-        let mut inserted = false;
         for incoming in poll.messages {
-            if let Some(complete) = guard.assembler.push(incoming)? {
-                let message = message_from_complete(complete);
-                if !guard.messages.iter().any(|existing| existing.id == message.id) {
-                    guard.messages.insert(0, message);
-                    inserted = true;
-                }
+            self.ingest_incoming(incoming)?;
+        }
+        Ok(self.snapshot())
+    }
+
+    pub fn start_sms_listener(
+        self: &Arc<Self>,
+        device_id: &str,
+        on_insert: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<AppSnapshot, String> {
+        if !device_id.starts_with("at:") {
+            return Err("background listener is currently implemented for explicit AT devices only".into());
+        }
+
+        // Only one serial listener may own a COM port at a time. Drop the old handle outside the mutex;
+        // its Drop implementation signals the worker and joins it before a new port is opened.
+        let previous = {
+            let mut listener = self
+                .listener
+                .lock()
+                .map_err(|_| "listener state poisoned".to_string())?;
+            if listener.as_ref().is_some_and(|active| active.device_id == device_id) {
+                return Ok(self.snapshot());
+            }
+            listener.take()
+        };
+        drop(previous);
+
+        let weak = Arc::downgrade(self);
+        let notifier = on_insert.clone();
+        let started = providers::start_sms_listener(device_id, move |incoming| {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            if matches!(state.ingest_incoming(incoming), Ok(true)) {
+                notifier();
+            }
+        })?;
+
+        {
+            let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
+            mark_device_connected(
+                &mut guard.devices,
+                device_id,
+                started.operator.clone(),
+                started.signal,
+            );
+            guard.selected_device_id = Some(device_id.to_string());
+        }
+        {
+            let mut listener = self
+                .listener
+                .lock()
+                .map_err(|_| "listener state poisoned".to_string())?;
+            *listener = Some(ActiveSmsListener {
+                device_id: device_id.to_string(),
+                _handle: started.handle,
+            });
+        }
+        Ok(self.snapshot())
+    }
+
+    pub fn stop_sms_listener(&self, device_id: &str) -> Result<AppSnapshot, String> {
+        let stopped = {
+            let mut listener = self
+                .listener
+                .lock()
+                .map_err(|_| "listener state poisoned".to_string())?;
+            match listener.as_ref() {
+                Some(active) if active.device_id == device_id => listener.take(),
+                _ => None,
+            }
+        };
+        drop(stopped);
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(device) = guard.devices.iter_mut().find(|device| device.id == device_id) {
+                device.status = "available".into();
             }
         }
-        guard.messages.truncate(1000);
-        if inserted {
-            self.store.save_messages(&guard.messages)?;
-        }
-        drop(guard);
         Ok(self.snapshot())
+    }
+
+    fn ingest_incoming(&self, incoming: IncomingSms) -> Result<bool, String> {
+        let mut guard = self.inner.lock().map_err(|_| "state poisoned".to_string())?;
+        let Some(complete) = guard.assembler.push(incoming)? else {
+            return Ok(false);
+        };
+        let message = message_from_complete(complete);
+        if guard.messages.iter().any(|existing| existing.id == message.id) {
+            return Ok(false);
+        }
+        guard.messages.insert(0, message);
+        guard.messages.truncate(1000);
+        self.store.save_messages(&guard.messages)?;
+        Ok(true)
+    }
+}
+
+fn mark_device_connected(
+    devices: &mut [crate::model::CellularDevice],
+    device_id: &str,
+    operator: Option<String>,
+    signal: Option<u8>,
+) {
+    if let Some(device) = devices.iter_mut().find(|device| device.id == device_id) {
+        device.status = "connected".into();
+        device.capabilities.sms_receive = true;
+        if operator.is_some() {
+            device.operator = operator;
+        }
+        if signal.is_some() {
+            device.signal = signal;
+        }
     }
 }
 

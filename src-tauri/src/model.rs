@@ -72,6 +72,7 @@ pub struct RuntimeCapabilities {
 pub struct AppSnapshot {
     pub devices: Vec<CellularDevice>,
     pub selected_device_id: Option<String>,
+    pub active_sms_listener_device_id: Option<String>,
     pub messages: Vec<SmsMessage>,
     pub esim_profiles: Vec<EsimProfile>,
     pub runtime: RuntimeCapabilities,

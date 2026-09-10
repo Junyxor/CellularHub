@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { createDemoSnapshot } from './demo';
 import type { AppSnapshot, EsimProfile } from '../types';
 
@@ -82,4 +83,27 @@ export async function refreshDevices(): Promise<AppSnapshot> {
 export async function pollSmsDevice(deviceId: string): Promise<AppSnapshot> {
   if (!isTauriRuntime()) return structuredClone(browserSnapshot);
   return invoke<AppSnapshot>('poll_sms_device', { deviceId });
+}
+
+export async function startSmsListener(deviceId: string): Promise<AppSnapshot> {
+  if (!isTauriRuntime()) {
+    browserSnapshot = { ...browserSnapshot, activeSmsListenerDeviceId: deviceId };
+    return structuredClone(browserSnapshot);
+  }
+  return invoke<AppSnapshot>('start_sms_listener', { deviceId });
+}
+
+export async function stopSmsListener(deviceId: string): Promise<AppSnapshot> {
+  if (!isTauriRuntime()) {
+    browserSnapshot = { ...browserSnapshot, activeSmsListenerDeviceId: undefined };
+    return structuredClone(browserSnapshot);
+  }
+  return invoke<AppSnapshot>('stop_sms_listener', { deviceId });
+}
+
+export async function subscribeSmsReceived(onSnapshot: (snapshot: AppSnapshot) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => undefined;
+  return listen('cellularhub:sms-received', async () => {
+    onSnapshot(await getSnapshot());
+  });
 }
