@@ -176,18 +176,27 @@ impl AppState {
             return Err("background listener is currently implemented for explicit AT devices only".into());
         }
 
-        // Only one serial listener may own a COM port at a time. Drop the old handle outside the mutex;
-        // its Drop implementation signals the worker and joins it before a new port is opened.
-        let previous = {
+        // Only one serial listener may own a COM port at a time. Decide what to do while holding
+        // the listener mutex, but never call snapshot() until that mutex has been released.
+        let (already_active, previous) = {
             let mut listener = self
                 .listener
                 .lock()
                 .map_err(|_| "listener state poisoned".to_string())?;
-            if listener.as_ref().is_some_and(|active| active.device_id == device_id) {
-                return Ok(self.snapshot());
+            if listener
+                .as_ref()
+                .is_some_and(|active| active.device_id == device_id)
+            {
+                (true, None)
+            } else {
+                (false, listener.take())
             }
-            listener.take()
         };
+        if already_active {
+            return Ok(self.snapshot());
+        }
+        // Drop the old handle outside the mutex; Drop signals the worker and joins it before a
+        // different selected port is opened.
         drop(previous);
 
         let weak = Arc::downgrade(self);
