@@ -1,5 +1,6 @@
 mod model;
 mod providers;
+mod sms;
 mod state;
 mod store;
 
@@ -44,6 +45,11 @@ fn install_esim_activation_code(code: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn decode_sms_pdu(pdu: String) -> Result<sms::pdu::DecodedPdu, String> {
+    sms::pdu::decode_deliver_pdu(&pdu)
+}
+
+#[tauri::command]
 fn set_window_mode(mode: String, app: tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or_else(|| "main window not found".to_string())?;
     match mode.as_str() {
@@ -78,6 +84,7 @@ pub fn run() {
             delete_esim_profile,
             refresh_devices,
             install_esim_activation_code,
+            decode_sms_pdu,
             set_window_mode,
         ])
         .run(tauri::generate_context!())

@@ -21,9 +21,9 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62.2", features = [
   "Win32_Foundation",
   "Win32_System_Com",
-  "Win32_NetworkManagement_WindowsConnectionManager",
-  "Win32_UI_Shell"
+  "Win32_System_Ole",
+  "Win32_NetworkManagement_MobileBroadband"
 ] }
